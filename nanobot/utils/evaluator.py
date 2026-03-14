@@ -6,26 +6,36 @@ LLM call to classify the result as normal or error.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from loguru import logger
 
 if TYPE_CHECKING:
     from nanobot.providers.base import LLMProvider
 
+BackgroundSeverity = Literal["normal", "error"]
+
 _EVALUATE_TOOL = [
     {
         "type": "function",
         "function": {
             "name": "evaluate_notification",
-            "description": "Classify a background agent result as normal or error.",
+            "description": (
+                "Classify a background agent result. "
+                "The severity value must be exactly one of these strings: "
+                "'normal' or 'error'."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "severity": {
                         "type": "string",
                         "enum": ["normal", "error"],
-                        "description": "error = failures, broken workflows, or user-action-needed issues; normal = routine progress or successful non-error output",
+                        "description": (
+                            "Return exactly 'error' for failures, broken workflows, "
+                            "or user-action-needed issues. Return exactly 'normal' "
+                            "for routine progress or successful non-error output."
+                        ),
                     },
                     "reason": {
                         "type": "string",
@@ -42,9 +52,11 @@ _SYSTEM_PROMPT = (
     "You are a severity classifier for a background agent. "
     "You will be given the original task context and a candidate outbound message. "
     "Call the evaluate_notification tool to classify the message.\n\n"
-    "Return error only when the message represents a real failure, broken workflow, "
+    "The severity value must be exactly one of these lowercase strings: "
+    "'normal' or 'error'.\n\n"
+    "Return 'error' only when the message represents a real failure, broken workflow, "
     "or a condition the user likely needs to act on.\n\n"
-    "Return normal for routine progress, successful completions, status updates, "
+    "Return 'normal' for routine progress, successful completions, status updates, "
     "tool hints, or confirmations that everything is fine."
 )
 
@@ -54,11 +66,12 @@ async def evaluate_response(
     task_context: str,
     provider: LLMProvider,
     model: str,
-) -> str:
+) -> BackgroundSeverity:
     """Classify a background-task result as normal or error.
 
     Uses a lightweight tool-call LLM request (same pattern as heartbeat
-    ``_decide()``). Falls back to ``error`` on any failure so important
+    ``_decide()``). Returns exactly ``"normal"`` or ``"error"``.
+    Falls back to ``"error"`` on any failure so important
     messages are never silently dropped in errors-only mode.
     """
     try:
