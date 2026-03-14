@@ -85,10 +85,13 @@ def gateway_background_runtime(monkeypatch, tmp_path: Path):
         *,
         config: Config | None = None,
         cron_job: CronJob | None = None,
-        heartbeat_response: str | None = None,
+        run_heartbeat: bool = False,
+        heartbeat_tasks: str = "check heartbeat",
         agent_response: str = "",
-        evaluator_result: bool = True,
-        sent_message_in_turn: bool = False,
+        progress_events: list[tuple[str, bool]] | None = None,
+        message_tool_calls: list[dict] | None = None,
+        evaluator_severity: str = "normal",
+        evaluator_by_content: dict[str, str] | None = None,
         sessions: list[dict[str, str]] | None = None,
         enabled_channels: list[str] | None = None,
     ) -> dict:
@@ -114,7 +117,9 @@ def gateway_background_runtime(monkeypatch, tmp_path: Path):
                 "task": task,
                 "model": model,
             })
-            return evaluator_result
+            if evaluator_by_content and response in evaluator_by_content:
+                return evaluator_by_content[response]
+            return evaluator_severity
 
         monkeypatch.setattr("nanobot.utils.evaluator.evaluate_response", _evaluate_response)
 
@@ -157,7 +162,14 @@ def gateway_background_runtime(monkeypatch, tmp_path: Path):
 
             async def process_direct(self, *args, **kwargs) -> str:
                 state["process_direct_calls"].append({"args": args, "kwargs": kwargs})
-                message_tool._sent_in_turn = sent_message_in_turn
+                message_tool.set_context(kwargs.get("channel", "cli"), kwargs.get("chat_id", "direct"))
+                message_tool.start_turn()
+                if progress_events and kwargs.get("on_progress") is not None:
+                    for content, tool_hint in progress_events:
+                        await kwargs["on_progress"](content, tool_hint=tool_hint)
+                if message_tool_calls:
+                    for call in message_tool_calls:
+                        await message_tool.execute(**call)
                 return agent_response
 
             async def run(self) -> None:
@@ -200,11 +212,14 @@ def gateway_background_runtime(monkeypatch, tmp_path: Path):
                 interval_s,
                 enabled,
             ) -> None:
+                self.on_execute = on_execute
                 self.on_notify = on_notify
 
             async def start(self) -> None:
-                if heartbeat_response is not None:
-                    await self.on_notify(heartbeat_response)
+                if run_heartbeat:
+                    response = await self.on_execute(heartbeat_tasks)
+                    if response:
+                        await self.on_notify(response)
 
             def stop(self) -> None:
                 return None
@@ -595,14 +610,13 @@ def test_gateway_warns_about_deprecated_memory_window(monkeypatch, tmp_path: Pat
     assert "contextWindowTokens" in result.stdout
 
 
-def test_gateway_cron_suppresses_exact_ok_signal_when_disabled(
+def test_gateway_cron_all_level_posts_normal_final_response(
     gateway_background_runtime,
 ) -> None:
     config = Config.model_validate({
         "gateway": {
             "cron": {
-                "okSignal": "CRON_OK",
-                "sendOkSignalMessages": False,
+                "feedbackLevel": "all",
             }
         }
     })
@@ -610,21 +624,21 @@ def test_gateway_cron_suppresses_exact_ok_signal_when_disabled(
     state = gateway_background_runtime(
         config=config,
         cron_job=_make_background_job(message="check status"),
-        agent_response="  CRON_OK  ",
+        agent_response="all good",
+        evaluator_severity="normal",
     )
 
-    assert state["outbound"] == []
-    assert state["evaluate_calls"] == []
+    assert len(state["outbound"]) == 1
+    assert state["outbound"][0].content == "all good"
 
 
-def test_gateway_cron_posts_non_token_response_when_evaluator_approves(
+def test_gateway_cron_errors_only_suppresses_normal_final_response(
     gateway_background_runtime,
 ) -> None:
     config = Config.model_validate({
         "gateway": {
             "cron": {
-                "okSignal": "CRON_OK",
-                "sendOkSignalMessages": False,
+                "feedbackLevel": "errors_only",
             }
         }
     })
@@ -632,72 +646,230 @@ def test_gateway_cron_posts_non_token_response_when_evaluator_approves(
     state = gateway_background_runtime(
         config=config,
         cron_job=_make_background_job(message="check status"),
-        agent_response="deployment failed on staging",
-        evaluator_result=True,
+        agent_response="all good",
+        evaluator_severity="normal",
     )
 
     assert len(state["evaluate_calls"]) == 1
-    outbound = state["outbound"]
-    assert len(outbound) == 1
-    assert outbound[0].channel == "telegram"
-    assert outbound[0].chat_id == "chat123"
-    assert outbound[0].content == "deployment failed on staging"
-
-
-def test_gateway_cron_skips_fallback_publish_when_message_tool_already_sent(
-    gateway_background_runtime,
-) -> None:
-    state = gateway_background_runtime(
-        cron_job=_make_background_job(message="check status"),
-        agent_response="deployment failed on staging",
-        sent_message_in_turn=True,
-    )
-
     assert state["outbound"] == []
-    assert state["evaluate_calls"] == []
 
 
-def test_gateway_heartbeat_suppresses_exact_ok_signal_when_disabled(
+def test_gateway_cron_errors_only_posts_error_final_response(
     gateway_background_runtime,
 ) -> None:
     config = Config.model_validate({
         "gateway": {
-            "heartbeat": {
-                "okSignal": "HEARTBEAT_OK",
-                "sendOkSignalMessages": False,
+            "cron": {
+                "feedbackLevel": "errors_only",
             }
         }
     })
 
     state = gateway_background_runtime(
         config=config,
-        heartbeat_response=" HEARTBEAT_OK ",
+        cron_job=_make_background_job(message="check status"),
+        agent_response="deployment failed on staging",
+        evaluator_severity="error",
+    )
+
+    assert len(state["outbound"]) == 1
+    assert state["outbound"][0].content == "deployment failed on staging"
+
+
+def test_gateway_cron_silent_suppresses_final_response(
+    gateway_background_runtime,
+) -> None:
+    config = Config.model_validate({
+        "gateway": {
+            "cron": {
+                "feedbackLevel": "silent",
+            }
+        }
+    })
+
+    state = gateway_background_runtime(
+        config=config,
+        cron_job=_make_background_job(message="check status"),
+        agent_response="deployment failed on staging",
+        evaluator_severity="error",
     )
 
     assert state["outbound"] == []
+    assert state["evaluate_calls"] == []
 
 
-def test_gateway_heartbeat_posts_non_token_response_to_latest_session(
+def test_gateway_cron_errors_only_suppresses_normal_progress_and_tool_hints(
+    gateway_background_runtime,
+) -> None:
+    config = Config.model_validate({
+        "gateway": {
+            "cron": {
+                "feedbackLevel": "errors_only",
+            }
+        }
+    })
+
+    state = gateway_background_runtime(
+        config=config,
+        cron_job=_make_background_job(message="check status"),
+        progress_events=[("working", False), ('read_file("foo.txt")', True)],
+    )
+
+    assert state["outbound"] == []
+    assert len(state["evaluate_calls"]) == 2
+
+
+def test_gateway_cron_errors_only_allows_error_message_tool_send(
+    gateway_background_runtime,
+) -> None:
+    config = Config.model_validate({
+        "gateway": {
+            "cron": {
+                "feedbackLevel": "errors_only",
+            }
+        }
+    })
+
+    state = gateway_background_runtime(
+        config=config,
+        cron_job=_make_background_job(message="check status"),
+        message_tool_calls=[{"content": "disk full"}],
+        evaluator_by_content={"disk full": "error"},
+    )
+
+    assert len(state["outbound"]) == 1
+    assert state["outbound"][0].content == "disk full"
+
+
+def test_gateway_cron_suppressed_message_tool_send_does_not_block_error_final(
+    gateway_background_runtime,
+) -> None:
+    config = Config.model_validate({
+        "gateway": {
+            "cron": {
+                "feedbackLevel": "errors_only",
+            }
+        }
+    })
+
+    state = gateway_background_runtime(
+        config=config,
+        cron_job=_make_background_job(message="check status"),
+        message_tool_calls=[{"content": "routine status"}],
+        agent_response="deployment failed on staging",
+        evaluator_by_content={
+            "routine status": "normal",
+            "deployment failed on staging": "error",
+        },
+    )
+
+    assert len(state["outbound"]) == 1
+    assert state["outbound"][0].content == "deployment failed on staging"
+
+
+def test_gateway_heartbeat_all_level_posts_normal_final_response(
     gateway_background_runtime,
 ) -> None:
     state = gateway_background_runtime(
-        heartbeat_response="deployment failed on staging",
+        config=Config.model_validate({
+            "gateway": {
+                "heartbeat": {
+                    "feedbackLevel": "all",
+                }
+            }
+        }),
+        run_heartbeat=True,
+        agent_response="all good",
+        evaluator_severity="normal",
         sessions=[{"key": "telegram:ops-room"}],
         enabled_channels=["telegram"],
     )
 
-    outbound = state["outbound"]
-    assert len(outbound) == 1
-    assert outbound[0].channel == "telegram"
-    assert outbound[0].chat_id == "ops-room"
-    assert outbound[0].content == "deployment failed on staging"
+    assert len(state["outbound"]) == 1
+    assert state["outbound"][0].content == "all good"
+
+
+def test_gateway_heartbeat_errors_only_suppresses_normal_final_response(
+    gateway_background_runtime,
+) -> None:
+    state = gateway_background_runtime(
+        config=Config.model_validate({
+            "gateway": {
+                "heartbeat": {
+                    "feedbackLevel": "errors_only",
+                }
+            }
+        }),
+        run_heartbeat=True,
+        agent_response="all good",
+        evaluator_severity="normal",
+        sessions=[{"key": "telegram:ops-room"}],
+        enabled_channels=["telegram"],
+    )
+
+    assert state["outbound"] == []
+
+
+def test_gateway_heartbeat_errors_only_posts_error_final_response(
+    gateway_background_runtime,
+) -> None:
+    state = gateway_background_runtime(
+        config=Config.model_validate({
+            "gateway": {
+                "heartbeat": {
+                    "feedbackLevel": "errors_only",
+                }
+            }
+        }),
+        run_heartbeat=True,
+        agent_response="deployment failed on staging",
+        evaluator_severity="error",
+        sessions=[{"key": "telegram:ops-room"}],
+        enabled_channels=["telegram"],
+    )
+
+    assert len(state["outbound"]) == 1
+    assert state["outbound"][0].content == "deployment failed on staging"
+
+
+def test_gateway_heartbeat_silent_suppresses_all_background_output(
+    gateway_background_runtime,
+) -> None:
+    state = gateway_background_runtime(
+        config=Config.model_validate({
+            "gateway": {
+                "heartbeat": {
+                    "feedbackLevel": "silent",
+                }
+            }
+        }),
+        run_heartbeat=True,
+        agent_response="deployment failed on staging",
+        evaluator_severity="error",
+        progress_events=[("thinking", False)],
+        message_tool_calls=[{"content": "disk full"}],
+        sessions=[{"key": "telegram:ops-room"}],
+        enabled_channels=["telegram"],
+    )
+
+    assert state["outbound"] == []
+    assert state["evaluate_calls"] == []
 
 
 def test_gateway_heartbeat_does_not_post_when_only_cli_target_exists(
     gateway_background_runtime,
 ) -> None:
     state = gateway_background_runtime(
-        heartbeat_response="deployment failed on staging",
+        config=Config.model_validate({
+            "gateway": {
+                "heartbeat": {
+                    "feedbackLevel": "all",
+                }
+            }
+        }),
+        run_heartbeat=True,
+        agent_response="deployment failed on staging",
+        evaluator_severity="error",
         sessions=[],
         enabled_channels=[],
     )

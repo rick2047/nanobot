@@ -1,7 +1,7 @@
-"""Post-run evaluation for background tasks (heartbeat & cron).
+"""Severity evaluation for background tasks (heartbeat & cron).
 
 After the agent executes a background task, this module makes a lightweight
-LLM call to decide whether the result warrants notifying the user.
+LLM call to classify the result as normal or error.
 """
 
 from __future__ import annotations
@@ -18,35 +18,34 @@ _EVALUATE_TOOL = [
         "type": "function",
         "function": {
             "name": "evaluate_notification",
-            "description": "Decide whether the user should be notified about this background task result.",
+            "description": "Classify a background agent result as normal or error.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "should_notify": {
-                        "type": "boolean",
-                        "description": "true = result contains actionable/important info the user should see; false = routine or empty, safe to suppress",
+                    "severity": {
+                        "type": "string",
+                        "enum": ["normal", "error"],
+                        "description": "error = failures, broken workflows, or user-action-needed issues; normal = routine progress or successful non-error output",
                     },
                     "reason": {
                         "type": "string",
-                        "description": "One-sentence reason for the decision",
+                        "description": "One-sentence reason for the classification",
                     },
                 },
-                "required": ["should_notify"],
+                "required": ["severity"],
             },
         },
     }
 ]
 
 _SYSTEM_PROMPT = (
-    "You are a notification gate for a background agent. "
-    "You will be given the original task and the agent's response. "
-    "Call the evaluate_notification tool to decide whether the user "
-    "should be notified.\n\n"
-    "Notify when the response contains actionable information, errors, "
-    "completed deliverables, or anything the user explicitly asked to "
-    "be reminded about.\n\n"
-    "Suppress when the response is a routine status check with nothing "
-    "new, a confirmation that everything is normal, or essentially empty."
+    "You are a severity classifier for a background agent. "
+    "You will be given the original task context and a candidate outbound message. "
+    "Call the evaluate_notification tool to classify the message.\n\n"
+    "Return error only when the message represents a real failure, broken workflow, "
+    "or a condition the user likely needs to act on.\n\n"
+    "Return normal for routine progress, successful completions, status updates, "
+    "tool hints, or confirmations that everything is fine."
 )
 
 
@@ -55,20 +54,20 @@ async def evaluate_response(
     task_context: str,
     provider: LLMProvider,
     model: str,
-) -> bool:
-    """Decide whether a background-task result should be delivered to the user.
+) -> str:
+    """Classify a background-task result as normal or error.
 
     Uses a lightweight tool-call LLM request (same pattern as heartbeat
-    ``_decide()``).  Falls back to ``True`` (notify) on any failure so
-    that important messages are never silently dropped.
+    ``_decide()``). Falls back to ``error`` on any failure so important
+    messages are never silently dropped in errors-only mode.
     """
     try:
         llm_response = await provider.chat_with_retry(
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": (
-                    f"## Original task\n{task_context}\n\n"
-                    f"## Agent response\n{response}"
+                    f"## Task context\n{task_context}\n\n"
+                    f"## Candidate message\n{response}"
                 )},
             ],
             tools=_EVALUATE_TOOL,
@@ -78,15 +77,17 @@ async def evaluate_response(
         )
 
         if not llm_response.has_tool_calls:
-            logger.warning("evaluate_response: no tool call returned, defaulting to notify")
-            return True
+            logger.warning("evaluate_response: no tool call returned, defaulting to error")
+            return "error"
 
         args = llm_response.tool_calls[0].arguments
-        should_notify = args.get("should_notify", True)
+        severity = args.get("severity", "error")
+        if severity not in {"normal", "error"}:
+            severity = "error"
         reason = args.get("reason", "")
-        logger.info("evaluate_response: should_notify={}, reason={}", should_notify, reason)
-        return bool(should_notify)
+        logger.info("evaluate_response: severity={}, reason={}", severity, reason)
+        return severity
 
     except Exception:
-        logger.exception("evaluate_response failed, defaulting to notify")
-        return True
+        logger.exception("evaluate_response failed, defaulting to error")
+        return "error"

@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 from pydantic_settings import BaseSettings
 
@@ -95,29 +95,13 @@ class HeartbeatConfig(Base):
 
     enabled: bool = True
     interval_s: int = 30 * 60  # 30 minutes
-    ok_signal: str = "HEARTBEAT_OK"
-    send_ok_signal_messages: bool = True
-
-    @field_validator("ok_signal")
-    @classmethod
-    def validate_ok_signal(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("ok_signal must not be empty")
-        return value
+    feedback_level: Literal["all", "errors_only", "silent"] = "all"
 
 
 class CronConfig(Base):
     """Cron delivery configuration."""
 
-    ok_signal: str = "CRON_OK"
-    send_ok_signal_messages: bool = True
-
-    @field_validator("ok_signal")
-    @classmethod
-    def validate_ok_signal(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("ok_signal must not be empty")
-        return value
+    feedback_level: Literal["all", "errors_only", "silent"] = "all"
 
 
 class GatewayConfig(Base):

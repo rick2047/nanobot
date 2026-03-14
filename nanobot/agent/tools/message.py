@@ -11,7 +11,7 @@ class MessageTool(Tool):
 
     def __init__(
         self,
-        send_callback: Callable[[OutboundMessage], Awaitable[None]] | None = None,
+        send_callback: Callable[[OutboundMessage], Awaitable[bool | None]] | None = None,
         default_channel: str = "",
         default_chat_id: str = "",
         default_message_id: str | None = None,
@@ -28,7 +28,7 @@ class MessageTool(Tool):
         self._default_chat_id = chat_id
         self._default_message_id = message_id
 
-    def set_send_callback(self, callback: Callable[[OutboundMessage], Awaitable[None]]) -> None:
+    def set_send_callback(self, callback: Callable[[OutboundMessage], Awaitable[bool | None]]) -> None:
         """Set the callback for sending messages."""
         self._send_callback = callback
 
@@ -100,9 +100,11 @@ class MessageTool(Tool):
         )
 
         try:
-            await self._send_callback(msg)
-            if channel == self._default_channel and chat_id == self._default_chat_id:
+            delivered = await self._send_callback(msg)
+            if delivered is not False and channel == self._default_channel and chat_id == self._default_chat_id:
                 self._sent_in_turn = True
+            if delivered is False:
+                return "Message suppressed by background feedback policy"
             media_info = f" with {len(media)} attachments" if media else ""
             return f"Message sent to {channel}:{chat_id}{media_info}"
         except Exception as e:

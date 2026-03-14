@@ -384,20 +384,16 @@ def _print_deprecated_memory_window_notice(config: Config) -> None:
             "[cyan]nanobot onboard[/cyan] to refresh your config template."
         )
 
-def _should_send_background_response(
-    response: str,
+def _should_publish_background_severity(
+    severity: str,
     *,
-    ok_signal: str,
-    send_ok_signal_messages: bool,
+    feedback_level: str,
 ) -> bool:
-    """Return True when a background response should be published outbound."""
-    if not response:
+    """Return True when a background message severity is allowed by policy."""
+    if feedback_level == "silent":
         return False
-
-    normalized_response = response.strip()
-    if normalized_response == ok_signal and not send_ok_signal_messages:
-        return False
-
+    if feedback_level == "errors_only":
+        return severity == "error"
     return True
 
 
@@ -468,53 +464,118 @@ def gateway(
         from nanobot.agent.tools.message import MessageTool
         from nanobot.utils.evaluator import evaluate_response
 
+        async def _publish_background_candidate(
+            content: str,
+            *,
+            channel: str,
+            chat_id: str,
+            feedback_level: str,
+            task_context: str,
+            source: str,
+            metadata: dict[str, Any] | None = None,
+            media: list[str] | None = None,
+            reply_to: str | None = None,
+        ) -> bool:
+            normalized = content.strip()
+            if not normalized or channel == "cli" or not chat_id:
+                return False
+            if feedback_level == "silent":
+                return False
+
+            severity = await evaluate_response(
+                normalized,
+                f"Source: {source}\nTask context: {task_context}",
+                provider,
+                agent.model,
+            )
+            if not _should_publish_background_severity(
+                severity,
+                feedback_level=feedback_level,
+            ):
+                return False
+
+            from nanobot.bus.events import OutboundMessage
+            await bus.publish_outbound(OutboundMessage(
+                channel=channel,
+                chat_id=chat_id,
+                content=content,
+                reply_to=reply_to,
+                media=media or [],
+                metadata=metadata or {},
+            ))
+            return True
+
         reminder_note = (
             "[Scheduled Task] Timer finished.\n\n"
             f"Task '{job.name}' has been triggered.\n"
-            f"Scheduled instruction: {job.payload.message}\n\n"
-            "If the work completes successfully and there is nothing user-facing to report, "
-            f"reply with {cron_delivery_cfg.ok_signal} exactly."
+            f"Scheduled instruction: {job.payload.message}"
         )
 
         cron_tool = agent.tools.get("cron")
+        message_tool = agent.tools.get("message")
         cron_token = None
+        original_send_callback = None
+        cron_channel = job.payload.channel or "cli"
+        cron_chat_id = job.payload.to or "direct"
+
+        async def _cron_progress(content: str, *, tool_hint: bool = False) -> None:
+            await _publish_background_candidate(
+                content,
+                channel=cron_channel,
+                chat_id=cron_chat_id,
+                feedback_level=cron_delivery_cfg.feedback_level,
+                task_context=job.payload.message,
+                source="cron_tool_hint" if tool_hint else "cron_progress",
+                metadata={
+                    "_progress": True,
+                    "_tool_hint": tool_hint,
+                },
+            )
+
+        async def _cron_message_send(msg) -> bool:
+            return await _publish_background_candidate(
+                msg.content,
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                feedback_level=cron_delivery_cfg.feedback_level,
+                task_context=job.payload.message,
+                source="cron_message_tool",
+                metadata=msg.metadata,
+                media=msg.media,
+                reply_to=msg.reply_to,
+            )
+
         if isinstance(cron_tool, CronTool):
             cron_token = cron_tool.set_cron_context(True)
+        if isinstance(message_tool, MessageTool):
+            original_send_callback = message_tool._send_callback
+            message_tool.set_send_callback(_cron_message_send)
         try:
             response = await agent.process_direct(
                 reminder_note,
                 session_key=f"cron:{job.id}",
-                channel=job.payload.channel or "cli",
-                chat_id=job.payload.to or "direct",
+                channel=cron_channel,
+                chat_id=cron_chat_id,
+                on_progress=_cron_progress,
             )
         finally:
             if isinstance(cron_tool, CronTool) and cron_token is not None:
                 cron_tool.reset_cron_context(cron_token)
+            if isinstance(message_tool, MessageTool) and original_send_callback is not None:
+                message_tool.set_send_callback(original_send_callback)
 
-        message_tool = agent.tools.get("message")
         if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
             return response
 
-        should_send_response = (
-            job.payload.deliver
-            and job.payload.to
-            and _should_send_background_response(
+        if job.payload.deliver and job.payload.to:
+            await _publish_background_candidate(
                 response,
-                ok_signal=cron_delivery_cfg.ok_signal,
-                send_ok_signal_messages=cron_delivery_cfg.send_ok_signal_messages,
+                channel=cron_channel,
+                chat_id=cron_chat_id,
+                feedback_level=cron_delivery_cfg.feedback_level,
+                task_context=job.payload.message,
+                source="cron_final",
             )
-        )
-        if should_send_response:
-            should_notify = await evaluate_response(
-                response, job.payload.message, provider, agent.model,
-            )
-            if should_notify:
-                from nanobot.bus.events import OutboundMessage
-                await bus.publish_outbound(OutboundMessage(
-                    channel=job.payload.channel or "cli",
-                    chat_id=job.payload.to,
-                    content=response,
-                ))
         return response
     cron.on_job = on_cron_job
 
@@ -538,32 +599,116 @@ def gateway(
         return "cli", "direct"
 
     # Create heartbeat service
+    last_heartbeat_tasks: dict[str, str] = {"value": ""}
+
     async def on_heartbeat_execute(tasks: str) -> str:
         """Phase 2: execute heartbeat tasks through the full agent loop."""
+        from nanobot.agent.tools.message import MessageTool
+        from nanobot.utils.evaluator import evaluate_response
+
         channel, chat_id = _pick_heartbeat_target()
+        last_heartbeat_tasks["value"] = tasks
 
-        async def _silent(*_args, **_kwargs):
-            pass
+        async def _publish_background_candidate(
+            content: str,
+            *,
+            target_channel: str,
+            target_chat_id: str,
+            source: str,
+            metadata: dict[str, Any] | None = None,
+            media: list[str] | None = None,
+            reply_to: str | None = None,
+        ) -> bool:
+            normalized = content.strip()
+            if not normalized or target_channel == "cli" or not target_chat_id:
+                return False
+            if heartbeat_cfg.feedback_level == "silent":
+                return False
 
-        return await agent.process_direct(
-            tasks,
-            session_key="heartbeat",
-            channel=channel,
-            chat_id=chat_id,
-            on_progress=_silent,
-        )
+            severity = await evaluate_response(
+                normalized,
+                f"Source: {source}\nTask context: {tasks}",
+                provider,
+                agent.model,
+            )
+            if not _should_publish_background_severity(
+                severity,
+                feedback_level=heartbeat_cfg.feedback_level,
+            ):
+                return False
+
+            from nanobot.bus.events import OutboundMessage
+            await bus.publish_outbound(OutboundMessage(
+                channel=target_channel,
+                chat_id=target_chat_id,
+                content=content,
+                reply_to=reply_to,
+                media=media or [],
+                metadata=metadata or {},
+            ))
+            return True
+
+        async def _heartbeat_progress(content: str, *, tool_hint: bool = False) -> None:
+            await _publish_background_candidate(
+                content,
+                target_channel=channel,
+                target_chat_id=chat_id,
+                source="heartbeat_tool_hint" if tool_hint else "heartbeat_progress",
+                metadata={
+                    "_progress": True,
+                    "_tool_hint": tool_hint,
+                },
+            )
+
+        message_tool = agent.tools.get("message")
+        original_send_callback = None
+
+        async def _heartbeat_message_send(msg) -> bool:
+            return await _publish_background_candidate(
+                msg.content,
+                target_channel=msg.channel,
+                target_chat_id=msg.chat_id,
+                source="heartbeat_message_tool",
+                metadata=msg.metadata,
+                media=msg.media,
+                reply_to=msg.reply_to,
+            )
+
+        if isinstance(message_tool, MessageTool):
+            original_send_callback = message_tool._send_callback
+            message_tool.set_send_callback(_heartbeat_message_send)
+
+        try:
+            return await agent.process_direct(
+                tasks,
+                session_key="heartbeat",
+                channel=channel,
+                chat_id=chat_id,
+                on_progress=_heartbeat_progress,
+            )
+        finally:
+            if isinstance(message_tool, MessageTool) and original_send_callback is not None:
+                message_tool.set_send_callback(original_send_callback)
 
     async def on_heartbeat_notify(response: str) -> None:
         """Deliver a heartbeat response to the user's channel."""
+        from nanobot.utils.evaluator import evaluate_response
         from nanobot.bus.events import OutboundMessage
         channel, chat_id = _pick_heartbeat_target()
         if channel == "cli":
             return  # No external channel available to deliver to
-
-        if not _should_send_background_response(
-            response,
-            ok_signal=heartbeat_cfg.ok_signal,
-            send_ok_signal_messages=heartbeat_cfg.send_ok_signal_messages,
+        normalized = response.strip()
+        if not normalized or heartbeat_cfg.feedback_level == "silent":
+            return
+        severity = await evaluate_response(
+            normalized,
+            f"Source: heartbeat_final\nTask context: {last_heartbeat_tasks['value']}",
+            provider,
+            agent.model,
+        )
+        if not _should_publish_background_severity(
+            severity,
+            feedback_level=heartbeat_cfg.feedback_level,
         ):
             return
         await bus.publish_outbound(OutboundMessage(channel=channel, chat_id=chat_id, content=response))

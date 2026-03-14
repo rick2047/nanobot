@@ -134,19 +134,17 @@ def test_onboard_refresh_backfills_missing_channel_fields(tmp_path, monkeypatch)
     assert saved["channels"]["qq"]["msgFormat"] == "plain"
 
 
-def test_load_config_accepts_gateway_ok_signal_fields(tmp_path) -> None:
+def test_load_config_accepts_gateway_feedback_levels(tmp_path) -> None:
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
             {
                 "gateway": {
                     "heartbeat": {
-                        "okSignal": "HB_DONE",
-                        "sendOkSignalMessages": False,
+                        "feedbackLevel": "errors_only",
                     },
                     "cron": {
-                        "okSignal": "CRON_DONE",
-                        "sendOkSignalMessages": False,
+                        "feedbackLevel": "silent",
                     },
                 }
             }
@@ -156,19 +154,17 @@ def test_load_config_accepts_gateway_ok_signal_fields(tmp_path) -> None:
 
     config = load_config(config_path)
 
-    assert config.gateway.heartbeat.ok_signal == "HB_DONE"
-    assert config.gateway.heartbeat.send_ok_signal_messages is False
-    assert config.gateway.cron.ok_signal == "CRON_DONE"
-    assert config.gateway.cron.send_ok_signal_messages is False
+    assert config.gateway.heartbeat.feedback_level == "errors_only"
+    assert config.gateway.cron.feedback_level == "silent"
 
 
 @pytest.mark.parametrize("path", ["heartbeat", "cron"])
-def test_gateway_ok_signal_rejects_empty_values(path: str) -> None:
-    with pytest.raises(ValueError, match="ok_signal must not be empty"):
+def test_gateway_feedback_level_rejects_invalid_values(path: str) -> None:
+    with pytest.raises(ValueError, match="Input should be 'all', 'errors_only' or 'silent'"):
         Config.model_validate({
             "gateway": {
                 path: {
-                    "okSignal": "   ",
+                    "feedbackLevel": "loud",
                 }
             }
         })

@@ -42,8 +42,7 @@ class HeartbeatService:
     Periodic heartbeat service that wakes the agent to check for tasks.
 
     Phase 1 (decision): reads HEARTBEAT.md and asks the LLM — via a virtual
-    tool call — whether there are active tasks.  This avoids free-text parsing
-    and the unreliable HEARTBEAT_OK token.
+    tool call — whether there are active tasks.
 
     Phase 2 (execution): only triggered when Phase 1 returns ``run``.  The
     ``on_execute`` callback runs the task through the full agent loop and
@@ -139,8 +138,6 @@ class HeartbeatService:
 
     async def _tick(self) -> None:
         """Execute a single heartbeat tick."""
-        from nanobot.utils.evaluator import evaluate_response
-
         content = self._read_heartbeat_file()
         if not content:
             logger.debug("Heartbeat: HEARTBEAT.md missing or empty")
@@ -159,15 +156,9 @@ class HeartbeatService:
             if self.on_execute:
                 response = await self.on_execute(tasks)
 
-                if response:
-                    should_notify = await evaluate_response(
-                        response, tasks, self.provider, self.model,
-                    )
-                    if should_notify and self.on_notify:
-                        logger.info("Heartbeat: completed, delivering response")
-                        await self.on_notify(response)
-                    else:
-                        logger.info("Heartbeat: silenced by post-run evaluation")
+                if response and self.on_notify:
+                    logger.info("Heartbeat: completed, handing off response")
+                    await self.on_notify(response)
         except Exception:
             logger.exception("Heartbeat execution failed")
 

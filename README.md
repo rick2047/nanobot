@@ -1277,8 +1277,6 @@ Interactive mode exits: `exit`, `quit`, `/exit`, `/quit`, `:q`, or `Ctrl+D`.
 
 The gateway wakes up every 30 minutes and checks `HEARTBEAT.md` in your workspace (`~/.nanobot/workspace/HEARTBEAT.md`). If the file has tasks, the agent executes them and delivers results to your most recently active chat channel.
 
-The default heartbeat template also instructs the agent to reply with `HEARTBEAT_OK` when all heartbeat work completes successfully and there is nothing user-facing to report. By default that token is still posted to the channel for backward compatibility. Set `gateway.heartbeat.sendOkSignalMessages` to `false` to suppress it.
-
 **Setup:** edit `~/.nanobot/workspace/HEARTBEAT.md` (created automatically by `nanobot onboard`):
 
 ```markdown
@@ -1294,31 +1292,26 @@ The agent can also manage this file itself — ask it to "add a periodic task" a
 
 </details>
 
-### Background OK Signals
+### Background Feedback Levels
 
-Heartbeat and cron background runs support exact-match OK tokens:
-
-- Heartbeat: `HEARTBEAT_OK`
-- Cron: `CRON_OK`
-
-If the final background response exactly matches the configured token after trimming whitespace, nanobot treats it as a success-without-user-output signal. Posting of those token messages is configurable per service:
+Heartbeat and cron background runs support three feedback levels:
 
 ```json
 {
   "gateway": {
     "heartbeat": {
-      "okSignal": "HEARTBEAT_OK",
-      "sendOkSignalMessages": false
+      "feedbackLevel": "errors_only"
     },
     "cron": {
-      "okSignal": "CRON_OK",
-      "sendOkSignalMessages": false
+      "feedbackLevel": "silent"
     }
   }
 }
 ```
 
-When `sendOkSignalMessages` is `true`, the raw token is posted as-is. Suppression applies only to the automatic background reply path; explicit use of the `message` tool is unchanged.
+- `all`: send normal and error background output
+- `errors_only`: send only output classified as error
+- `silent`: suppress all background output
 
 ## 🐳 Docker
 
