@@ -5,6 +5,7 @@ import os
 import select
 import signal
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -500,36 +501,19 @@ def gateway(
         ))
         return True
 
-    async def _run_background_turn(
+    @contextmanager
+    def _wrap_background_message_delivery(
         *,
-        content: str,
-        session_key: str,
         channel: str,
         chat_id: str,
         feedback_level: str,
         task_context: str,
-        progress_source: str,
-        tool_hint_source: str,
-        message_source: str,
-    ) -> str:
+        source: str,
+    ):
         from nanobot.agent.tools.message import MessageTool
 
         message_tool = agent.tools.get("message")
         original_send_callback = None
-
-        async def _background_progress(progress_content: str, *, tool_hint: bool = False) -> None:
-            await _publish_background_candidate(
-                progress_content,
-                channel=channel,
-                chat_id=chat_id,
-                feedback_level=feedback_level,
-                task_context=task_context,
-                source=tool_hint_source if tool_hint else progress_source,
-                metadata={
-                    "_progress": True,
-                    "_tool_hint": tool_hint,
-                },
-            )
 
         async def _background_message_send(msg) -> bool:
             return await _publish_background_candidate(
@@ -538,7 +522,7 @@ def gateway(
                 chat_id=msg.chat_id,
                 feedback_level=feedback_level,
                 task_context=task_context,
-                source=message_source,
+                source=source,
                 metadata=msg.metadata,
                 media=msg.media,
                 reply_to=msg.reply_to,
@@ -547,15 +531,8 @@ def gateway(
         if isinstance(message_tool, MessageTool):
             original_send_callback = message_tool._send_callback
             message_tool.set_send_callback(_background_message_send)
-
         try:
-            return await agent.process_direct(
-                content,
-                session_key=session_key,
-                channel=channel,
-                chat_id=chat_id,
-                on_progress=_background_progress,
-            )
+            yield message_tool
         finally:
             if isinstance(message_tool, MessageTool) and original_send_callback is not None:
                 message_tool.set_send_callback(original_send_callback)
@@ -573,29 +550,46 @@ def gateway(
         )
 
         cron_tool = agent.tools.get("cron")
-        message_tool = agent.tools.get("message")
         cron_token = None
         cron_channel = job.payload.channel or "cli"
         cron_chat_id = job.payload.to or "direct"
 
-        if isinstance(cron_tool, CronTool):
-            cron_token = cron_tool.set_cron_context(True)
-        try:
-            response = await _run_background_turn(
-                content=reminder_note,
-                session_key=f"cron:{job.id}",
+        async def _cron_progress(content: str, *, tool_hint: bool = False) -> None:
+            await _publish_background_candidate(
+                content,
                 channel=cron_channel,
                 chat_id=cron_chat_id,
                 feedback_level=cron_delivery_cfg.feedback_level,
                 task_context=job.payload.message,
-                progress_source="cron_progress",
-                tool_hint_source="cron_tool_hint",
-                message_source="cron_message_tool",
+                source="cron_tool_hint" if tool_hint else "cron_progress",
+                metadata={
+                    "_progress": True,
+                    "_tool_hint": tool_hint,
+                },
             )
+
+        if isinstance(cron_tool, CronTool):
+            cron_token = cron_tool.set_cron_context(True)
+        try:
+            with _wrap_background_message_delivery(
+                channel=cron_channel,
+                chat_id=cron_chat_id,
+                feedback_level=cron_delivery_cfg.feedback_level,
+                task_context=job.payload.message,
+                source="cron_message_tool",
+            ) as message_tool:
+                response = await agent.process_direct(
+                    reminder_note,
+                    session_key=f"cron:{job.id}",
+                    channel=cron_channel,
+                    chat_id=cron_chat_id,
+                    on_progress=_cron_progress,
+                )
         finally:
             if isinstance(cron_tool, CronTool) and cron_token is not None:
                 cron_tool.reset_cron_context(cron_token)
 
+        message_tool = agent.tools.get("message")
         if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
             return response
 
@@ -637,17 +631,35 @@ def gateway(
         """Phase 2: execute heartbeat tasks through the full agent loop."""
         channel, chat_id = _pick_heartbeat_target()
         last_heartbeat_tasks["value"] = tasks
-        return await _run_background_turn(
-            content=tasks,
-            session_key="heartbeat",
+
+        async def _heartbeat_progress(content: str, *, tool_hint: bool = False) -> None:
+            await _publish_background_candidate(
+                content,
+                channel=channel,
+                chat_id=chat_id,
+                feedback_level=heartbeat_cfg.feedback_level,
+                task_context=tasks,
+                source="heartbeat_tool_hint" if tool_hint else "heartbeat_progress",
+                metadata={
+                    "_progress": True,
+                    "_tool_hint": tool_hint,
+                },
+            )
+
+        with _wrap_background_message_delivery(
             channel=channel,
             chat_id=chat_id,
             feedback_level=heartbeat_cfg.feedback_level,
             task_context=tasks,
-            progress_source="heartbeat_progress",
-            tool_hint_source="heartbeat_tool_hint",
-            message_source="heartbeat_message_tool",
-        )
+            source="heartbeat_message_tool",
+        ):
+            return await agent.process_direct(
+                tasks,
+                session_key="heartbeat",
+                channel=channel,
+                chat_id=chat_id,
+                on_progress=_heartbeat_progress,
+            )
 
     async def on_heartbeat_notify(response: str) -> None:
         """Deliver a heartbeat response to the user's channel."""
