@@ -4,6 +4,7 @@ from typing import Any, Awaitable, Callable
 
 from nanobot.agent.tools.base import Tool
 from nanobot.bus.events import OutboundMessage
+from nanobot.utils.evaluator import should_deliver_background_message
 
 
 class MessageTool(Tool):
@@ -111,9 +112,10 @@ class MessageTool(Tool):
         if not self._send_callback:
             return "Error: Message sending not configured"
 
-        if self._feedback_level == "silent":
-            return "Message suppressed by background feedback policy"
-        if self._feedback_level == "errors_only" and severity != "error":
+        if not should_deliver_background_message(
+            feedback_level=self._feedback_level,
+            severity=severity,
+        ):
             return "Message suppressed by background feedback policy"
 
         msg = OutboundMessage(
