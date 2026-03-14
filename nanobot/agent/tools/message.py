@@ -4,7 +4,6 @@ from typing import Any, Awaitable, Callable
 
 from nanobot.agent.tools.base import Tool
 from nanobot.bus.events import OutboundMessage
-from nanobot.utils.evaluator import should_deliver_background_message
 
 
 class MessageTool(Tool):
@@ -22,7 +21,6 @@ class MessageTool(Tool):
         self._default_chat_id = default_chat_id
         self._default_message_id = default_message_id
         self._sent_in_turn: bool = False
-        self._feedback_level: str | None = None
 
     def set_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
         """Set the current message context."""
@@ -34,15 +32,6 @@ class MessageTool(Tool):
         """Set the callback for sending messages."""
         self._send_callback = callback
 
-    @property
-    def feedback_level(self) -> str | None:
-        """Return the active background feedback level, if any."""
-        return self._feedback_level
-
-    def set_feedback_level(self, feedback_level: str | None) -> None:
-        """Set background feedback gating for explicit message sends."""
-        self._feedback_level = feedback_level
-
     def start_turn(self) -> None:
         """Reset per-turn send tracking."""
         self._sent_in_turn = False
@@ -53,10 +42,7 @@ class MessageTool(Tool):
 
     @property
     def description(self) -> str:
-        return (
-            "Send a message to the user. Use this when you want to communicate something. "
-            "For background runs, set severity='error' only for real failures or action-needed issues."
-        )
+        return "Send a message to the user. Use this when you want to communicate something."
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -79,14 +65,6 @@ class MessageTool(Tool):
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Optional: list of file paths to attach (images, audio, documents)"
-                },
-                "severity": {
-                    "type": "string",
-                    "enum": ["normal", "error"],
-                    "description": (
-                        "Optional: classify the message for background feedback policy. "
-                        "Defaults to 'normal'."
-                    ),
                 }
             },
             "required": ["content"]
@@ -99,7 +77,6 @@ class MessageTool(Tool):
         chat_id: str | None = None,
         message_id: str | None = None,
         media: list[str] | None = None,
-        severity: str = "normal",
         **kwargs: Any
     ) -> str:
         channel = channel or self._default_channel
@@ -111,12 +88,6 @@ class MessageTool(Tool):
 
         if not self._send_callback:
             return "Error: Message sending not configured"
-
-        if not should_deliver_background_message(
-            feedback_level=self._feedback_level,
-            severity=severity,
-        ):
-            return "Message suppressed by background feedback policy"
 
         msg = OutboundMessage(
             channel=channel,
