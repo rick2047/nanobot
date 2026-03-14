@@ -21,3 +21,35 @@ async def test_message_tool_suppressed_send_does_not_mark_turn_as_sent() -> None
 
     assert result == "Message suppressed by background feedback policy"
     assert tool._sent_in_turn is False
+
+
+@pytest.mark.asyncio
+async def test_message_tool_errors_only_suppresses_normal_messages() -> None:
+    async def _send(_msg) -> bool:
+        raise AssertionError("suppressed message should not be sent")
+
+    tool = MessageTool(send_callback=_send, default_channel="telegram", default_chat_id="chat1")
+    tool.set_feedback_level("errors_only")
+
+    result = await tool.execute(content="routine status")
+
+    assert result == "Message suppressed by background feedback policy"
+    assert tool._sent_in_turn is False
+
+
+@pytest.mark.asyncio
+async def test_message_tool_errors_only_allows_error_messages() -> None:
+    sent = []
+
+    async def _send(msg) -> bool:
+        sent.append(msg)
+        return True
+
+    tool = MessageTool(send_callback=_send, default_channel="telegram", default_chat_id="chat1")
+    tool.set_feedback_level("errors_only")
+
+    result = await tool.execute(content="disk full", severity="error")
+
+    assert result == "Message sent to telegram:chat1"
+    assert len(sent) == 1
+    assert tool._sent_in_turn is True
