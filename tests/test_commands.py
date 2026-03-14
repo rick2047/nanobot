@@ -152,7 +152,7 @@ def gateway_background_runtime(monkeypatch, tmp_path: Path):
 
         monkeypatch.setattr("nanobot.channels.manager.ChannelManager", _FakeChannelManager)
 
-        message_tool = MessageTool()
+        message_tool = MessageTool(send_callback=_FakeBus().publish_outbound)
 
         class _FakeAgentLoop:
             def __init__(self, *args, **kwargs) -> None:
@@ -716,7 +716,7 @@ def test_gateway_cron_errors_only_suppresses_normal_progress_and_tool_hints(
     )
 
     assert state["outbound"] == []
-    assert len(state["evaluate_calls"]) == 2
+    assert state["evaluate_calls"] == []
 
 
 def test_gateway_cron_errors_only_allows_error_message_tool_send(
@@ -733,8 +733,7 @@ def test_gateway_cron_errors_only_allows_error_message_tool_send(
     state = gateway_background_runtime(
         config=config,
         cron_job=_make_background_job(message="check status"),
-        message_tool_calls=[{"content": "disk full"}],
-        evaluator_by_content={"disk full": "error"},
+        message_tool_calls=[{"content": "disk full", "severity": "error"}],
     )
 
     assert len(state["outbound"]) == 1
@@ -847,7 +846,7 @@ def test_gateway_heartbeat_silent_suppresses_all_background_output(
         agent_response="deployment failed on staging",
         evaluator_severity="error",
         progress_events=[("thinking", False)],
-        message_tool_calls=[{"content": "disk full"}],
+        message_tool_calls=[{"content": "disk full", "severity": "error"}],
         sessions=[{"key": "telegram:ops-room"}],
         enabled_channels=["telegram"],
     )
