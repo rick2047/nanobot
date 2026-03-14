@@ -6,14 +6,12 @@ LLM call to classify the result as normal or error.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from loguru import logger
 
 if TYPE_CHECKING:
     from nanobot.providers.base import LLMProvider
-
-BackgroundSeverity = Literal["normal", "error"]
 
 _EVALUATE_TOOL = [
     {
@@ -66,7 +64,7 @@ async def evaluate_response(
     task_context: str,
     provider: LLMProvider,
     model: str,
-) -> BackgroundSeverity:
+) -> str:
     """Classify a background-task result as normal or error.
 
     Uses a lightweight tool-call LLM request (same pattern as heartbeat
