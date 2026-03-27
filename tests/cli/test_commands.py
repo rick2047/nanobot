@@ -1,5 +1,6 @@
 import json
 import re
+import shutil
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -17,11 +18,6 @@ runner = CliRunner()
 
 class _StopGatewayError(RuntimeError):
     pass
-
-
-import shutil
-
-import pytest
 
 
 @pytest.fixture
@@ -640,6 +636,22 @@ def test_heartbeat_retains_recent_messages_by_default():
     config = Config()
 
     assert config.gateway.heartbeat.keep_recent_messages == 8
+
+
+def test_gateway_notification_targets_config() -> None:
+    config = Config.model_validate(
+        {
+            "gateway": {
+                "heartbeat": {"notify": {"channel": "discord", "chatId": "123"}},
+                "cron": {"notify": {"channel": "telegram", "chatId": "456"}},
+            }
+        }
+    )
+
+    assert config.gateway.heartbeat.notify.channel == "discord"
+    assert config.gateway.heartbeat.notify.chat_id == "123"
+    assert config.gateway.cron.notify.channel == "telegram"
+    assert config.gateway.cron.notify.chat_id == "456"
 
 
 def test_gateway_uses_workspace_from_config_by_default(monkeypatch, tmp_path: Path) -> None:

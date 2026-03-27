@@ -1,7 +1,7 @@
 """CLI commands for nanobot."""
 
 import asyncio
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 
 import os
 import select
@@ -22,6 +22,7 @@ if sys.platform == "win32":
             pass
 
 import typer
+from loguru import logger
 from prompt_toolkit import PromptSession, print_formatted_text
 from prompt_toolkit.application import run_in_terminal
 from prompt_toolkit.formatted_text import ANSI, HTML
@@ -491,6 +492,17 @@ def _migrate_cron_store(config: "Config") -> None:
         shutil.move(str(legacy_path), str(new_path))
 
 
+def _configured_notify_target(channel: str, chat_id: str, config_key: str) -> tuple[str, str] | None:
+    """Return a configured target if both fields are present, else ``None``."""
+    ch = channel.strip()
+    cid = chat_id.strip()
+    if ch and cid:
+        return ch, cid
+    if ch or cid:
+        logger.warning("{} is partially configured (channel='{}', chatId='{}'); ignoring override", config_key, ch, cid)
+    return None
+
+
 # ============================================================================
 # Gateway / Server
 # ============================================================================
@@ -552,6 +564,42 @@ def gateway(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
     )
+    hb_override_target = _configured_notify_target(
+        config.gateway.heartbeat.notify.channel,
+        config.gateway.heartbeat.notify.chat_id,
+        "gateway.heartbeat.notify",
+    )
+    cron_override_target = _configured_notify_target(
+        config.gateway.cron.notify.channel,
+        config.gateway.cron.notify.chat_id,
+        "gateway.cron.notify",
+    )
+
+    # Create channel manager
+    channels = ChannelManager(config, bus)
+
+    def _pick_heartbeat_target() -> tuple[str, str]:
+        """Pick a routable channel/chat target for heartbeat-triggered messages."""
+        if hb_override_target is not None:
+            return hb_override_target
+
+        enabled = set(channels.enabled_channels)
+        # Prefer the most recently updated non-internal session on an enabled channel.
+        for item in session_manager.list_sessions():
+            key = item.get("key") or ""
+            if ":" not in key:
+                continue
+            channel, chat_id = key.split(":", 1)
+            if channel in {"cli", "system"}:
+                continue
+            if channel in enabled and chat_id:
+                return channel, chat_id
+        # Fallback keeps prior behavior but remains explicit.
+        return "cli", "direct"
+
+    def _pick_cron_target(job: CronJob) -> tuple[str, str]:
+        """Pick the execution/notification target for cron-triggered turns."""
+        return cron_override_target or (job.payload.channel or "cli", job.payload.to or "direct")
 
     # Set cron callback (needs agent)
     async def on_cron_job(job: CronJob) -> str | None:
@@ -568,14 +616,15 @@ def gateway(
 
         cron_tool = agent.tools.get("cron")
         cron_token = None
+        exec_channel, exec_chat_id = _pick_cron_target(job)
         if isinstance(cron_tool, CronTool):
             cron_token = cron_tool.set_cron_context(True)
         try:
             resp = await agent.process_direct(
                 reminder_note,
                 session_key=f"cron:{job.id}",
-                channel=job.payload.channel or "cli",
-                chat_id=job.payload.to or "direct",
+                channel=exec_channel,
+                chat_id=exec_chat_id,
             )
         finally:
             if isinstance(cron_tool, CronTool) and cron_token is not None:
@@ -587,38 +636,20 @@ def gateway(
         if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
             return response
 
-        if job.payload.deliver and job.payload.to and response:
+        has_delivery_target = bool(job.payload.to) or cron_override_target is not None
+        if job.payload.deliver and has_delivery_target and response:
             should_notify = await evaluate_response(
                 response, job.payload.message, provider, agent.model,
             )
             if should_notify:
                 from nanobot.bus.events import OutboundMessage
                 await bus.publish_outbound(OutboundMessage(
-                    channel=job.payload.channel or "cli",
-                    chat_id=job.payload.to,
+                    channel=exec_channel,
+                    chat_id=exec_chat_id,
                     content=response,
                 ))
         return response
     cron.on_job = on_cron_job
-
-    # Create channel manager
-    channels = ChannelManager(config, bus)
-
-    def _pick_heartbeat_target() -> tuple[str, str]:
-        """Pick a routable channel/chat target for heartbeat-triggered messages."""
-        enabled = set(channels.enabled_channels)
-        # Prefer the most recently updated non-internal session on an enabled channel.
-        for item in session_manager.list_sessions():
-            key = item.get("key") or ""
-            if ":" not in key:
-                continue
-            channel, chat_id = key.split(":", 1)
-            if channel in {"cli", "system"}:
-                continue
-            if channel in enabled and chat_id:
-                return channel, chat_id
-        # Fallback keeps prior behavior but remains explicit.
-        return "cli", "direct"
 
     # Create heartbeat service
     async def on_heartbeat_execute(tasks: str) -> str:

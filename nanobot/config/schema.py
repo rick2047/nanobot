@@ -87,12 +87,26 @@ class ProvidersConfig(Base):
     github_copilot: ProviderConfig = Field(default_factory=ProviderConfig, exclude=True)  # Github Copilot (OAuth)
 
 
+class NotificationTargetConfig(Base):
+    """Generic notification target (channel + chat_id)."""
+
+    channel: str = ""
+    chat_id: str = ""
+
+
 class HeartbeatConfig(Base):
     """Heartbeat service configuration."""
 
     enabled: bool = True
     interval_s: int = 30 * 60  # 30 minutes
     keep_recent_messages: int = 8
+    notify: NotificationTargetConfig = Field(default_factory=NotificationTargetConfig)
+
+
+class CronConfig(Base):
+    """Cron service configuration."""
+
+    notify: NotificationTargetConfig = Field(default_factory=NotificationTargetConfig)
 
 
 class GatewayConfig(Base):
@@ -101,6 +115,8 @@ class GatewayConfig(Base):
     host: str = "0.0.0.0"
     port: int = 18790
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
+    cron: CronConfig = Field(default_factory=CronConfig)
+
 
 
 class WebSearchConfig(Base):
