@@ -259,6 +259,7 @@ class DiscordChannel(BaseChannel):
         self.config: DiscordConfig = config
         self._client: DiscordBotClient | None = None
         self._typing_tasks: dict[str, asyncio.Task[None]] = {}
+        self._source_messages: dict[tuple[str, str], Any] = {}
         self._bot_user_id: str | None = None
 
     async def start(self) -> None:
@@ -334,6 +335,7 @@ class DiscordChannel(BaseChannel):
         media_paths, attachment_markers = await self._download_attachments(message.attachments)
         full_content = self._compose_inbound_content(content, attachment_markers)
         metadata = self._build_inbound_metadata(message)
+        self._cache_source_message(channel_id, str(message.id), message)
 
         await self._start_typing(message.channel)
         await self._add_reaction(message, self.config.react_emoji)
@@ -467,6 +469,18 @@ class DiscordChannel(BaseChannel):
         for channel_id in channel_ids:
             await self._stop_typing(channel_id)
 
+    @staticmethod
+    def _source_key(chat_id: str, message_id: str) -> tuple[str, str]:
+        return str(chat_id), str(message_id)
+
+    def _cache_source_message(self, chat_id: str, message_id: str, message: Any) -> None:
+        """Track the latest source messages for reaction finalization."""
+        self._source_messages[self._source_key(chat_id, message_id)] = message
+
+    def _pop_source_message(self, chat_id: str, message_id: str) -> Any | None:
+        """Fetch and remove a cached source message."""
+        return self._source_messages.pop(self._source_key(chat_id, message_id), None)
+
     async def _add_reaction(self, message: discord.Message, emoji: str) -> None:
         """Add a reaction to a message (best-effort)."""
         if not emoji:
@@ -491,35 +505,13 @@ class DiscordChannel(BaseChannel):
 
     async def _mark_done_reaction(self, msg: OutboundMessage) -> None:
         """Flip in-progress reaction to done reaction on the source message (best-effort)."""
-        client = self._client
-        if client is None:
-            return
-
         meta = msg.metadata or {}
         message_id_raw = meta.get("message_id")
         if not message_id_raw:
             return
 
-        try:
-            channel_id = int(msg.chat_id)
-            message_id = int(str(message_id_raw))
-        except (TypeError, ValueError):
-            return
-
-        channel = client.get_channel(channel_id)
-        if channel is None:
-            try:
-                channel = await client.fetch_channel(channel_id)
-            except Exception:
-                return
-
-        fetch_message = getattr(channel, "fetch_message", None)
-        if not callable(fetch_message):
-            return
-
-        try:
-            source_message = await fetch_message(message_id)
-        except Exception:
+        source_message = self._pop_source_message(msg.chat_id, str(message_id_raw))
+        if source_message is None:
             return
 
         await self._remove_reaction(source_message, self.config.react_emoji)
@@ -534,4 +526,5 @@ class DiscordChannel(BaseChannel):
             except Exception as e:
                 logger.warning("Discord client close failed: {}", e)
         self._client = None
+        self._source_messages.clear()
         self._bot_user_id = None

@@ -306,6 +306,7 @@ async def test_on_message_accepts_allowlisted_dm() -> None:
     assert handled[0]["chat_id"] == "456"
     assert handled[0]["metadata"] == {"message_id": "789", "guild_id": None, "reply_to": None}
     assert message.added_reactions == ["👀"]
+    assert channel._source_messages[("456", "789")] is message
 
 
 @pytest.mark.asyncio
@@ -663,11 +664,9 @@ async def test_send_updates_source_message_reactions_on_final_response() -> None
     channel = DiscordChannel(DiscordConfig(enabled=True, allow_from=["*"]), MessageBus())
     client = _FakeDiscordClient(channel, intents=None)
     source_message = _FakeReactionMessage(message_id=789)
-    source_channel = _FakeChannel(channel_id=123)
-    source_channel.messages[789] = source_message
-    client.channels[123] = source_channel
     channel._client = client
     channel._running = True
+    channel._cache_source_message("123", "789", source_message)
 
     await channel.send(
         OutboundMessage(
@@ -680,6 +679,7 @@ async def test_send_updates_source_message_reactions_on_final_response() -> None
 
     assert source_message.removed_reactions == [("👀", client.user)]
     assert source_message.added_reactions == ["✅"]
+    assert ("123", "789") not in channel._source_messages
 
 
 @pytest.mark.asyncio
@@ -687,11 +687,9 @@ async def test_send_progress_does_not_update_source_message_reactions() -> None:
     channel = DiscordChannel(DiscordConfig(enabled=True, allow_from=["*"]), MessageBus())
     client = _FakeDiscordClient(channel, intents=None)
     source_message = _FakeReactionMessage(message_id=789)
-    source_channel = _FakeChannel(channel_id=123)
-    source_channel.messages[789] = source_message
-    client.channels[123] = source_channel
     channel._client = client
     channel._running = True
+    channel._cache_source_message("123", "789", source_message)
 
     await channel.send(
         OutboundMessage(
@@ -704,6 +702,38 @@ async def test_send_progress_does_not_update_source_message_reactions() -> None:
 
     assert source_message.removed_reactions == []
     assert source_message.added_reactions == []
+    assert ("123", "789") in channel._source_messages
+
+
+@pytest.mark.asyncio
+async def test_send_final_skips_done_reaction_on_cache_miss() -> None:
+    channel = DiscordChannel(DiscordConfig(enabled=True, allow_from=["*"]), MessageBus())
+    client = _FakeDiscordClient(channel, intents=None)
+    channel._client = client
+    channel._running = True
+
+    await channel.send(
+        OutboundMessage(
+            channel="discord",
+            chat_id="123",
+            content="done",
+            metadata={"message_id": "789"},
+        )
+    )
+
+    assert channel._source_messages == {}
+
+
+def test_source_message_cache_overwrites_existing_key() -> None:
+    channel = DiscordChannel(DiscordConfig(enabled=True, allow_from=["*"]), MessageBus())
+    first = _FakeReactionMessage(message_id=1)
+    second = _FakeReactionMessage(message_id=2)
+
+    channel._cache_source_message("123", "789", first)
+    channel._cache_source_message("123", "789", second)
+
+    assert channel._source_messages[("123", "789")] is second
+    assert len(channel._source_messages) == 1
 
 
 @pytest.mark.asyncio
