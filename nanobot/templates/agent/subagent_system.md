@@ -9,6 +9,20 @@ Stay focused on the assigned task. Your final response will be reported back to 
 
 ## Workspace
 {{ workspace }}
+{% if profile_name %}
+
+## Active Profile
+- Name: {{ profile_name }}
+- Description: {{ profile_description }}
+{% endif %}
+
+## Available Tools
+{{ available_tools }}
+{% if preloaded_skills %}
+
+## Preloaded Skills
+{{ preloaded_skills }}
+{% endif %}
 {% if skills_summary %}
 
 ## Skills

@@ -49,7 +49,20 @@ class SkillsLoader:
             entries.append({"name": name, "path": str(skill_file), "source": source})
         return entries
 
-    def list_skills(self, filter_unavailable: bool = True) -> list[dict[str, str]]:
+    @staticmethod
+    def _filter_skill_entries(
+        entries: list[dict[str, str]],
+        allowed_names: set[str] | None = None,
+    ) -> list[dict[str, str]]:
+        if allowed_names is None:
+            return entries
+        return [entry for entry in entries if entry["name"] in allowed_names]
+
+    def list_skills(
+        self,
+        filter_unavailable: bool = True,
+        allowed_names: set[str] | None = None,
+    ) -> list[dict[str, str]]:
         """
         List all available skills.
 
@@ -65,6 +78,7 @@ class SkillsLoader:
             skills.extend(
                 self._skill_entries_from_dir(self.builtin_skills, "builtin", skip_names=workspace_names)
             )
+        skills = self._filter_skill_entries(skills, allowed_names)
 
         if filter_unavailable:
             return [skill for skill in skills if self._check_requirements(self._get_skill_meta(skill["name"]))]
@@ -106,7 +120,7 @@ class SkillsLoader:
         ]
         return "\n\n---\n\n".join(parts)
 
-    def build_skills_summary(self) -> str:
+    def build_skills_summary(self, allowed_names: set[str] | None = None) -> str:
         """
         Build a summary of all skills (name, description, path, availability).
 
@@ -116,7 +130,7 @@ class SkillsLoader:
         Returns:
             XML-formatted skills summary.
         """
-        all_skills = self.list_skills(filter_unavailable=False)
+        all_skills = self.list_skills(filter_unavailable=False, allowed_names=allowed_names)
         if not all_skills:
             return ""
 
@@ -140,6 +154,13 @@ class SkillsLoader:
             lines.append("  </skill>")
         lines.append("</skills>")
         return "\n".join(lines)
+
+    def get_skill_paths(self, allowed_names: set[str] | None = None) -> dict[str, Path]:
+        """Return skill directories keyed by skill name."""
+        return {
+            entry["name"]: Path(entry["path"]).parent
+            for entry in self.list_skills(filter_unavailable=False, allowed_names=allowed_names)
+        }
 
     def _get_missing_requirements(self, skill_meta: dict) -> str:
         """Get a description of missing requirements."""

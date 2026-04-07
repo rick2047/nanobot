@@ -408,73 +408,18 @@ def _make_provider(config: Config):
 
     Routing is driven by ``ProviderSpec.backend`` in the registry.
     """
-    from nanobot.providers.base import GenerationSettings
-    from nanobot.providers.registry import find_by_name
+    from nanobot.providers.provider import ProviderConfigurationError, ProviderFactory
 
-    model = config.agents.defaults.model
-    provider_name = config.get_provider_name(model)
-    p = config.get_provider(model)
-    spec = find_by_name(provider_name) if provider_name else None
-    backend = spec.backend if spec else "openai_compat"
-
-    # --- validation ---
-    if backend == "azure_openai":
-        if not p or not p.api_key or not p.api_base:
-            console.print("[red]Error: Azure OpenAI requires api_key and api_base.[/red]")
+    try:
+        return ProviderFactory(config).create()
+    except ProviderConfigurationError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        if "Azure OpenAI" in str(e):
             console.print("Set them in ~/.nanobot/config.json under providers.azure_openai section")
             console.print("Use the model field to specify the deployment name.")
-            raise typer.Exit(1)
-    elif backend == "openai_compat" and not model.startswith("bedrock/"):
-        needs_key = not (p and p.api_key)
-        exempt = spec and (spec.is_oauth or spec.is_local or spec.is_direct)
-        if needs_key and not exempt:
-            console.print("[red]Error: No API key configured.[/red]")
+        elif "API key" in str(e):
             console.print("Set one in ~/.nanobot/config.json under providers section")
-            raise typer.Exit(1)
-
-    # --- instantiation by backend ---
-    if backend == "openai_codex":
-        from nanobot.providers.openai_codex_provider import OpenAICodexProvider
-
-        provider = OpenAICodexProvider(default_model=model)
-    elif backend == "azure_openai":
-        from nanobot.providers.azure_openai_provider import AzureOpenAIProvider
-
-        provider = AzureOpenAIProvider(
-            api_key=p.api_key,
-            api_base=p.api_base,
-            default_model=model,
-        )
-    elif backend == "github_copilot":
-        from nanobot.providers.github_copilot_provider import GitHubCopilotProvider
-        provider = GitHubCopilotProvider(default_model=model)
-    elif backend == "anthropic":
-        from nanobot.providers.anthropic_provider import AnthropicProvider
-
-        provider = AnthropicProvider(
-            api_key=p.api_key if p else None,
-            api_base=config.get_api_base(model),
-            default_model=model,
-            extra_headers=p.extra_headers if p else None,
-        )
-    else:
-        from nanobot.providers.openai_compat_provider import OpenAICompatProvider
-
-        provider = OpenAICompatProvider(
-            api_key=p.api_key if p else None,
-            api_base=config.get_api_base(model),
-            default_model=model,
-            extra_headers=p.extra_headers if p else None,
-            spec=spec,
-        )
-
-    defaults = config.agents.defaults
-    provider.generation = GenerationSettings(
-        temperature=defaults.temperature,
-        max_tokens=defaults.max_tokens,
-        reasoning_effort=defaults.reasoning_effort,
-    )
-    return provider
+        raise typer.Exit(1)
 
 
 def _load_runtime_config(config: str | None = None, workspace: str | None = None) -> Config:
@@ -571,6 +516,9 @@ def serve(
     timeout = timeout if timeout is not None else api_cfg.timeout
     sync_workspace_templates(runtime_config.workspace_path)
     bus = MessageBus()
+    from nanobot.providers.provider import ProviderFactory
+
+    provider_factory = ProviderFactory(runtime_config)
     provider = _make_provider(runtime_config)
     session_manager = SessionManager(runtime_config.workspace_path)
     agent_loop = AgentLoop(
@@ -590,6 +538,8 @@ def serve(
         mcp_servers=runtime_config.tools.mcp_servers,
         channels_config=runtime_config.channels,
         timezone=runtime_config.agents.defaults.timezone,
+        provider_factory=provider_factory,
+        subagent_profiles=runtime_config.agents.subagents,
     )
 
     model_name = runtime_config.agents.defaults.model
@@ -651,6 +601,9 @@ def gateway(
     console.print(f"{__logo__} Starting nanobot gateway version {__version__} on port {port}...")
     sync_workspace_templates(config.workspace_path)
     bus = MessageBus()
+    from nanobot.providers.provider import ProviderFactory
+
+    provider_factory = ProviderFactory(config)
     provider = _make_provider(config)
     session_manager = SessionManager(config.workspace_path)
 
@@ -681,6 +634,8 @@ def gateway(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         timezone=config.agents.defaults.timezone,
+        provider_factory=provider_factory,
+        subagent_profiles=config.agents.subagents,
     )
 
     # Set cron callback (needs agent)
@@ -880,6 +835,9 @@ def agent(
     sync_workspace_templates(config.workspace_path)
 
     bus = MessageBus()
+    from nanobot.providers.provider import ProviderFactory
+
+    provider_factory = ProviderFactory(config)
     provider = _make_provider(config)
 
     # Preserve existing single-workspace installs, but keep custom workspaces clean.
@@ -912,6 +870,8 @@ def agent(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         timezone=config.agents.defaults.timezone,
+        provider_factory=provider_factory,
+        subagent_profiles=config.agents.subagents,
     )
     restart_notice = consume_restart_notice_from_env()
     if restart_notice and should_show_cli_restart_notice(restart_notice, session_id):

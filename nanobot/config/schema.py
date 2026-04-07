@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.alias_generators import to_camel
 from pydantic_settings import BaseSettings
 
@@ -59,6 +59,19 @@ class DreamConfig(Base):
         return f"every {hours}h"
 
 
+SUBAGENT_SAFE_TOOL_NAMES = frozenset({
+    "read_file",
+    "write_file",
+    "edit_file",
+    "list_dir",
+    "glob",
+    "grep",
+    "exec",
+    "web_search",
+    "web_fetch",
+})
+
+
 class AgentDefaults(Base):
     """Default agent configuration."""
 
@@ -79,10 +92,65 @@ class AgentDefaults(Base):
     dream: DreamConfig = Field(default_factory=DreamConfig)
 
 
+class SubagentConfig(Base):
+    """Reusable configuration for a named subagent profile."""
+
+    description: str
+    provider: str | None = None
+    model: str | None = None
+    temperature: float | None = None
+    max_tokens: int | None = None
+    reasoning_effort: str | None = None
+    max_iterations: int | None = Field(default=None, ge=1)
+    tools: list[str] | None = None
+    skills: list[str] | None = None
+
+    @field_validator("provider")
+    @classmethod
+    def _normalize_provider(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        from nanobot.providers.registry import find_by_name
+
+        spec = find_by_name(value)
+        if spec is None:
+            raise ValueError(f"Unknown provider: {value}")
+        return spec.name
+
+    @field_validator("tools")
+    @classmethod
+    def _validate_tools(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        normalized = [tool.strip().replace("-", "_") for tool in value if tool and tool.strip()]
+        unknown = sorted({tool for tool in normalized if tool not in SUBAGENT_SAFE_TOOL_NAMES})
+        if unknown:
+            allowed = ", ".join(sorted(SUBAGENT_SAFE_TOOL_NAMES))
+            raise ValueError(
+                f"Unknown subagent tools: {', '.join(unknown)}. Allowed tools: {allowed}"
+            )
+        return list(dict.fromkeys(normalized))
+
+    @field_validator("skills")
+    @classmethod
+    def _normalize_skills(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        cleaned = [skill.strip() for skill in value if skill and skill.strip()]
+        return list(dict.fromkeys(cleaned))
+
+    @model_validator(mode="after")
+    def _validate_profile(self) -> "SubagentConfig":
+        if self.provider and not self.model:
+            raise ValueError("Subagent profile provider requires model to also be set")
+        return self
+
+
 class AgentsConfig(Base):
     """Agent configuration."""
 
     defaults: AgentDefaults = Field(default_factory=AgentDefaults)
+    subagents: dict[str, SubagentConfig] = Field(default_factory=dict)
 
 
 class ProviderConfig(Base):

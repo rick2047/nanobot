@@ -16,7 +16,7 @@ from nanobot.agent.context import ContextBuilder
 from nanobot.agent.hook import AgentHook, AgentHookContext, CompositeHook
 from nanobot.agent.memory import Consolidator, Dream
 from nanobot.agent.runner import AgentRunSpec, AgentRunner
-from nanobot.agent.subagent import SubagentManager
+from nanobot.agent.subagent import SubagentManager, SubagentRuntimeDefaults
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
@@ -31,12 +31,13 @@ from nanobot.command import CommandContext, CommandRouter, register_builtin_comm
 from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import AgentDefaults
 from nanobot.providers.base import LLMProvider
+from nanobot.providers.provider import ProviderFactory
 from nanobot.session.manager import Session, SessionManager
 from nanobot.utils.helpers import image_placeholder_text, truncate_text
 from nanobot.utils.runtime import EMPTY_FINAL_RESPONSE_MESSAGE
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import ChannelsConfig, ExecToolConfig, WebToolsConfig
+    from nanobot.config.schema import ChannelsConfig, ExecToolConfig, SubagentConfig, WebToolsConfig
     from nanobot.cron.service import CronService
 
 
@@ -180,6 +181,8 @@ class AgentLoop:
         channels_config: ChannelsConfig | None = None,
         timezone: str | None = None,
         hooks: list[AgentHook] | None = None,
+        provider_factory: ProviderFactory | None = None,
+        subagent_profiles: dict[str, "SubagentConfig"] | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig, WebToolsConfig
 
@@ -216,6 +219,14 @@ class AgentLoop:
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
         self.runner = AgentRunner(provider)
+        main_provider_name = None
+        if provider_factory is not None:
+            main_provider_name = provider_factory.resolve_request(
+                model=self.model,
+                temperature=provider.generation.temperature,
+                max_tokens=provider.generation.max_tokens,
+                reasoning_effort=provider.generation.reasoning_effort,
+            ).provider_name
         self.subagents = SubagentManager(
             provider=provider,
             workspace=workspace,
@@ -225,6 +236,14 @@ class AgentLoop:
             max_tool_result_chars=self.max_tool_result_chars,
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
+            provider_factory=provider_factory,
+            main_defaults=SubagentRuntimeDefaults(
+                provider_name=main_provider_name,
+                model=self.model,
+                generation=provider.generation,
+                max_iterations=self.max_iterations,
+            ),
+            subagent_profiles=subagent_profiles,
         )
 
         self._running = False

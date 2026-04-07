@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     tool_parameters_schema(
         task=StringSchema("The task for the subagent to complete"),
         label=StringSchema("Optional short label for the task (for display)"),
+        profile=StringSchema("Optional configured subagent profile id to use", nullable=True),
         required=["task"],
     )
 )
@@ -37,19 +38,34 @@ class SpawnTool(Tool):
 
     @property
     def description(self) -> str:
-        return (
+        base = (
             "Spawn a subagent to handle a task in the background. "
             "Use this for complex or time-consuming tasks that can run independently. "
             "The subagent will complete the task and report back when done. "
             "For deliverables or existing projects, inspect the workspace first "
             "and use a dedicated subdirectory when helpful."
         )
+        profiles = self._manager.get_profile_descriptions()
+        if not profiles:
+            return base
+        profile_lines = "\n".join(
+            f"- {profile_id}: {description}"
+            for profile_id, description in profiles
+        )
+        return f"{base}\n\nConfigured profiles:\n{profile_lines}"
 
-    async def execute(self, task: str, label: str | None = None, **kwargs: Any) -> str:
+    async def execute(
+        self,
+        task: str,
+        label: str | None = None,
+        profile: str | None = None,
+        **kwargs: Any,
+    ) -> str:
         """Spawn a subagent to execute the given task."""
         return await self._manager.spawn(
             task=task,
             label=label,
+            profile=profile,
             origin_channel=self._origin_channel,
             origin_chat_id=self._origin_chat_id,
             session_key=self._session_key,

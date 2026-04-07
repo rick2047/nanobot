@@ -10,6 +10,9 @@ from nanobot.providers.base import LLMProvider, LLMResponse
 __all__ = [
     "LLMProvider",
     "LLMResponse",
+    "ProviderConfigurationError",
+    "ProviderFactory",
+    "ProviderRequest",
     "AnthropicProvider",
     "OpenAICompatProvider",
     "OpenAICodexProvider",
@@ -18,6 +21,9 @@ __all__ = [
 ]
 
 _LAZY_IMPORTS = {
+    "ProviderConfigurationError": ".provider",
+    "ProviderFactory": ".provider",
+    "ProviderRequest": ".provider",
     "AnthropicProvider": ".anthropic_provider",
     "OpenAICompatProvider": ".openai_compat_provider",
     "OpenAICodexProvider": ".openai_codex_provider",
@@ -31,6 +37,11 @@ if TYPE_CHECKING:
     from nanobot.providers.github_copilot_provider import GitHubCopilotProvider
     from nanobot.providers.openai_compat_provider import OpenAICompatProvider
     from nanobot.providers.openai_codex_provider import OpenAICodexProvider
+    from nanobot.providers.provider import (
+        ProviderConfigurationError,
+        ProviderFactory,
+        ProviderRequest,
+    )
 
 
 def __getattr__(name: str):
