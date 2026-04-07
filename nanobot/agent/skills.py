@@ -141,13 +141,6 @@ class SkillsLoader:
         lines.append("</skills>")
         return "\n".join(lines)
 
-    def get_skill_paths(self) -> dict[str, Path]:
-        """Return skill directories keyed by skill name."""
-        return {
-            entry["name"]: Path(entry["path"]).parent
-            for entry in self.list_skills(filter_unavailable=False)
-        }
-
     def _get_missing_requirements(self, skill_meta: dict) -> str:
         """Get a description of missing requirements."""
         requires = skill_meta.get("requires", {})

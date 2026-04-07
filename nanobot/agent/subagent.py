@@ -325,7 +325,7 @@ class SubagentManager:
         skill_names = tuple(profile.skills or ())
         if skill_names:
             available_skill_paths = self._filter_skill_paths(
-                SkillsLoader(self.workspace).get_skill_paths(),
+                self._skill_paths(SkillsLoader(self.workspace)),
                 skill_names,
             )
             missing = [name for name in skill_names if name not in available_skill_paths]
@@ -364,6 +364,13 @@ class SubagentManager:
         return {name: path for name, path in skill_paths.items() if name in allowed}
 
     @staticmethod
+    def _skill_paths(loader: SkillsLoader) -> dict[str, Path]:
+        return {
+            entry["name"]: Path(entry["path"]).parent
+            for entry in loader.list_skills(filter_unavailable=False)
+        }
+
+    @staticmethod
     def _filter_skills_summary(skills_summary: str, allowed_skills: tuple[str, ...] | None) -> str:
         if not allowed_skills or not skills_summary:
             return skills_summary
@@ -397,7 +404,7 @@ class SubagentManager:
             return None
         loader = SkillsLoader(self.workspace)
         allowed_skill_dirs = list(
-            self._filter_skill_paths(loader.get_skill_paths(), resolved_profile.skills).values()
+            self._filter_skill_paths(self._skill_paths(loader), resolved_profile.skills).values()
         )
         return _SkillPathGuard(self.workspace, allowed_skill_dirs)
 
