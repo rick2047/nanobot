@@ -324,7 +324,10 @@ class SubagentManager:
 
         skill_names = tuple(profile.skills or ())
         if skill_names:
-            available_skill_paths = SkillsLoader(self.workspace).get_skill_paths(set(skill_names))
+            available_skill_paths = self._filter_skill_paths(
+                SkillsLoader(self.workspace).get_skill_paths(),
+                skill_names,
+            )
             missing = [name for name in skill_names if name not in available_skill_paths]
             if missing:
                 raise ValueError(
@@ -350,11 +353,52 @@ class SubagentManager:
             use_fresh_provider=True,
         )
 
+    @staticmethod
+    def _filter_skill_paths(
+        skill_paths: dict[str, Path],
+        allowed_skills: tuple[str, ...] | None,
+    ) -> dict[str, Path]:
+        if not allowed_skills:
+            return skill_paths
+        allowed = set(allowed_skills)
+        return {name: path for name, path in skill_paths.items() if name in allowed}
+
+    @staticmethod
+    def _filter_skills_summary(skills_summary: str, allowed_skills: tuple[str, ...] | None) -> str:
+        if not allowed_skills or not skills_summary:
+            return skills_summary
+
+        allowed = set(allowed_skills)
+        blocks: list[str] = []
+        current: list[str] = []
+        inside = False
+
+        for line in skills_summary.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("<skill "):
+                current = [line]
+                inside = True
+                continue
+            if inside:
+                current.append(line)
+                if stripped == "</skill>":
+                    block = "\n".join(current)
+                    if any(f"<name>{name}</name>" in block for name in allowed):
+                        blocks.append(block)
+                    current = []
+                    inside = False
+
+        if not blocks:
+            return ""
+        return "<skills>\n" + "\n".join(blocks) + "\n</skills>"
+
     def _build_skill_guard(self, resolved_profile: ResolvedSubagentProfile) -> _SkillPathGuard | None:
         if not resolved_profile.skills:
             return None
         loader = SkillsLoader(self.workspace)
-        allowed_skill_dirs = list(loader.get_skill_paths(set(resolved_profile.skills)).values())
+        allowed_skill_dirs = list(
+            self._filter_skill_paths(loader.get_skill_paths(), resolved_profile.skills).values()
+        )
         return _SkillPathGuard(self.workspace, allowed_skill_dirs)
 
     def _tool_enabled(self, tool_name: str) -> bool:
@@ -451,8 +495,10 @@ class SubagentManager:
 
         time_ctx = ContextBuilder._build_runtime_context(None, None)
         skills_loader = SkillsLoader(self.workspace)
-        allowed_skills = set(resolved_profile.skills or []) or None
-        skills_summary = skills_loader.build_skills_summary(allowed_names=allowed_skills)
+        skills_summary = self._filter_skills_summary(
+            skills_loader.build_skills_summary(),
+            resolved_profile.skills,
+        )
         preloaded_skills = (
             skills_loader.load_skills_for_context(list(resolved_profile.skills))
             if resolved_profile.skills
